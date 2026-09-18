@@ -1,4 +1,5 @@
 #include <furi.h>
+#include <string.h>
 #include <gui/gui.h>
 #include <gui/view_dispatcher.h>
 #include <gui/modules/submenu.h>
@@ -19,6 +20,42 @@ typedef enum {
 #define DEGREE_COUNT 100 /* 1..100 */
 #define VOLUME_COUNT 250 /* 0.1 .. 25.0, step 0.1 */
 
+/* Holding Left/Right for longer than ACCEL_HOLD_MS speeds up the step size,
+   so decimal-heavy fields like Volume don't take forever to scroll through. */
+#define ACCEL_HOLD_MS 1500
+#define ACCEL_REPEAT_GAP_MS 400
+
+typedef struct {
+    uint32_t last_tick;
+    uint32_t hold_start_tick;
+} AccelState;
+
+static uint8_t
+    apply_accel(AccelState* accel, uint8_t old_idx, uint8_t raw_idx, uint8_t max_idx, uint8_t accel_step) {
+    uint32_t now = furi_get_tick();
+    int32_t dir = 0;
+    if(raw_idx > old_idx) dir = 1;
+    else if(raw_idx < old_idx) dir = -1;
+
+    if(dir == 0) {
+        accel->last_tick = now;
+        accel->hold_start_tick = now;
+        return raw_idx;
+    }
+
+    if(now - accel->last_tick > ACCEL_REPEAT_GAP_MS) {
+        accel->hold_start_tick = now;
+    }
+    accel->last_tick = now;
+
+    int32_t step = (now - accel->hold_start_tick > ACCEL_HOLD_MS) ? accel_step : 1;
+
+    int32_t result = (int32_t)old_idx + dir * step;
+    if(result < 0) result = 0;
+    if(result > (int32_t)max_idx) result = (int32_t)max_idx;
+    return (uint8_t)result;
+}
+
 typedef struct {
     Gui* gui;
     ViewDispatcher* view_dispatcher;
@@ -33,6 +70,9 @@ typedef struct {
     uint8_t d_before_idx;
     uint8_t d_after_idx;
     uint8_t d_volume_idx;
+    AccelState d_before_accel;
+    AccelState d_after_accel;
+    AccelState d_volume_accel;
     VariableItem* d_water_item;
     VariableItem* d_total_item;
 
@@ -41,6 +81,10 @@ typedef struct {
     uint8_t m_c1_idx;
     uint8_t m_v2_idx;
     uint8_t m_c2_idx;
+    AccelState m_v1_accel;
+    AccelState m_c1_accel;
+    AccelState m_v2_accel;
+    AccelState m_c2_accel;
     VariableItem* m_total_v_item;
     VariableItem* m_total_c_item;
 
@@ -48,6 +92,9 @@ typedef struct {
     uint8_t t_volume_idx;
     uint8_t t_degree_idx;
     uint8_t t_spirit_idx;
+    AccelState t_volume_accel;
+    AccelState t_degree_accel;
+    AccelState t_spirit_accel;
     VariableItem* t_spirit_item;
     VariableItem* t_water_item;
 } AlcoholCalcApp;
@@ -93,7 +140,9 @@ static void dilute_recalculate(AlcoholCalcApp* app) {
 
 static void dilute_before_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->d_before_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->d_before_idx = apply_accel(&app->d_before_accel, app->d_before_idx, raw, DEGREE_COUNT - 1, 5);
+    variable_item_set_current_value_index(item, app->d_before_idx);
     char buf[8];
     snprintf(buf, sizeof(buf), "%u%%", degree_from_idx(app->d_before_idx));
     variable_item_set_current_value_text(item, buf);
@@ -102,7 +151,9 @@ static void dilute_before_changed(VariableItem* item) {
 
 static void dilute_after_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->d_after_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->d_after_idx = apply_accel(&app->d_after_accel, app->d_after_idx, raw, DEGREE_COUNT - 1, 5);
+    variable_item_set_current_value_index(item, app->d_after_idx);
     char buf[8];
     snprintf(buf, sizeof(buf), "%u%%", degree_from_idx(app->d_after_idx));
     variable_item_set_current_value_text(item, buf);
@@ -111,7 +162,9 @@ static void dilute_after_changed(VariableItem* item) {
 
 static void dilute_volume_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->d_volume_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->d_volume_idx = apply_accel(&app->d_volume_accel, app->d_volume_idx, raw, VOLUME_COUNT - 1, 10);
+    variable_item_set_current_value_index(item, app->d_volume_idx);
     char buf[12];
     snprintf(buf, sizeof(buf), "%.1f L", (double)volume_from_idx(app->d_volume_idx));
     variable_item_set_current_value_text(item, buf);
@@ -176,7 +229,9 @@ static void mix_recalculate(AlcoholCalcApp* app) {
 
 static void mix_v1_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->m_v1_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->m_v1_idx = apply_accel(&app->m_v1_accel, app->m_v1_idx, raw, VOLUME_COUNT - 1, 10);
+    variable_item_set_current_value_index(item, app->m_v1_idx);
     char buf[12];
     snprintf(buf, sizeof(buf), "%.1f L", (double)volume_from_idx(app->m_v1_idx));
     variable_item_set_current_value_text(item, buf);
@@ -185,7 +240,9 @@ static void mix_v1_changed(VariableItem* item) {
 
 static void mix_c1_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->m_c1_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->m_c1_idx = apply_accel(&app->m_c1_accel, app->m_c1_idx, raw, DEGREE_COUNT - 1, 5);
+    variable_item_set_current_value_index(item, app->m_c1_idx);
     char buf[8];
     snprintf(buf, sizeof(buf), "%u%%", degree_from_idx(app->m_c1_idx));
     variable_item_set_current_value_text(item, buf);
@@ -194,7 +251,9 @@ static void mix_c1_changed(VariableItem* item) {
 
 static void mix_v2_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->m_v2_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->m_v2_idx = apply_accel(&app->m_v2_accel, app->m_v2_idx, raw, VOLUME_COUNT - 1, 10);
+    variable_item_set_current_value_index(item, app->m_v2_idx);
     char buf[12];
     snprintf(buf, sizeof(buf), "%.1f L", (double)volume_from_idx(app->m_v2_idx));
     variable_item_set_current_value_text(item, buf);
@@ -203,7 +262,9 @@ static void mix_v2_changed(VariableItem* item) {
 
 static void mix_c2_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->m_c2_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->m_c2_idx = apply_accel(&app->m_c2_accel, app->m_c2_idx, raw, DEGREE_COUNT - 1, 5);
+    variable_item_set_current_value_index(item, app->m_c2_idx);
     char buf[8];
     snprintf(buf, sizeof(buf), "%u%%", degree_from_idx(app->m_c2_idx));
     variable_item_set_current_value_text(item, buf);
@@ -274,7 +335,9 @@ static void target_recalculate(AlcoholCalcApp* app) {
 
 static void target_volume_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->t_volume_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->t_volume_idx = apply_accel(&app->t_volume_accel, app->t_volume_idx, raw, VOLUME_COUNT - 1, 10);
+    variable_item_set_current_value_index(item, app->t_volume_idx);
     char buf[12];
     snprintf(buf, sizeof(buf), "%.1f L", (double)volume_from_idx(app->t_volume_idx));
     variable_item_set_current_value_text(item, buf);
@@ -283,7 +346,9 @@ static void target_volume_changed(VariableItem* item) {
 
 static void target_degree_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->t_degree_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->t_degree_idx = apply_accel(&app->t_degree_accel, app->t_degree_idx, raw, DEGREE_COUNT - 1, 5);
+    variable_item_set_current_value_index(item, app->t_degree_idx);
     char buf[8];
     snprintf(buf, sizeof(buf), "%u%%", degree_from_idx(app->t_degree_idx));
     variable_item_set_current_value_text(item, buf);
@@ -292,7 +357,9 @@ static void target_degree_changed(VariableItem* item) {
 
 static void target_spirit_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    app->t_spirit_idx = variable_item_get_current_value_index(item);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->t_spirit_idx = apply_accel(&app->t_spirit_accel, app->t_spirit_idx, raw, DEGREE_COUNT - 1, 5);
+    variable_item_set_current_value_index(item, app->t_spirit_idx);
     char buf[8];
     snprintf(buf, sizeof(buf), "%u%%", degree_from_idx(app->t_spirit_idx));
     variable_item_set_current_value_text(item, buf);
@@ -365,6 +432,7 @@ static bool alcohol_calc_navigation_event_callback(void* context) {
 
 static AlcoholCalcApp* alcohol_calc_app_alloc(void) {
     AlcoholCalcApp* app = malloc(sizeof(AlcoholCalcApp));
+    memset(app, 0, sizeof(AlcoholCalcApp));
 
     app->gui = furi_record_open(RECORD_GUI);
     app->view_dispatcher = view_dispatcher_alloc();
