@@ -10,15 +10,7 @@ A small Flipper Zero application for home distillers: calculates spirit dilution
 
 All values are edited with the ◀ ▶ buttons, like in Flipper's own settings menus.
 
-## Screenshots
-
-| Menu | Dilute | Mix |
-|---|---|---|
-| ![menu](screenshots/01_menu.png) | ![dilute](screenshots/02_dilute.png) | ![mix](screenshots/03_mix.png) |
-
-| Target volume | About |
-|---|---|
-| ![target](screenshots/04_target.png) | ![about](screenshots/05_about.png) |
+Screenshots are in the [`screenshots/`](screenshots) folder.
 
 ## Install
 
