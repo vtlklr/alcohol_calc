@@ -10,6 +10,16 @@ A small Flipper Zero application for home distillers: calculates spirit dilution
 
 All values are edited with the ◀ ▶ buttons, like in Flipper's own settings menus.
 
+## Screenshots
+
+| Menu | Dilute | Mix |
+|---|---|---|
+| ![menu](screenshots/01_menu.png) | ![dilute](screenshots/02_dilute.png) | ![mix](screenshots/03_mix.png) |
+
+| Target volume | About |
+|---|---|
+| ![target](screenshots/04_target.png) | ![about](screenshots/05_about.png) |
+
 ## Install
 
 Prebuilt `.fap` files are attached to each GitHub Actions build (see the *Actions* tab → latest run → *Artifacts*). Copy the file to `SD Card/apps/Tools/` on your Flipper, or install it with [qFlipper](https://flipperzero.one/update).
