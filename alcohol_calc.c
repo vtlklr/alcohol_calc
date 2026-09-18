@@ -18,13 +18,8 @@ typedef enum {
 } AlcoholCalcView;
 
 #define DEGREE_COUNT 100 /* 1..100 */
-
-/* Volume is split into whole liters + tenths because VariableItemList's
-   values_count is a uint8_t (max 255 steps), which can't fit a single
-   0.1 L-precision field spanning 0..100 L (that would need 1000 steps). */
-#define VOLUME_L_COUNT 101 /* 0..100 */
-#define VOLUME_DL_COUNT 10 /* 0..9 tenths */
 #define VOLUME_MAX 100.0f
+#define VOLUME_MIN 0.1f
 
 /* Holding Left/Right for longer than ACCEL_HOLD_MS speeds up the step size,
    so decimal-heavy fields like Volume don't take forever to scroll through. */
@@ -62,38 +57,34 @@ static uint8_t
     return (uint8_t)result;
 }
 
-/* Volume fields are split across two adjacent rows: whole liters (0..100)
-   and tenths (0..9). These helpers keep both rows and their accel state in
-   sync and clamp the pair so the combined value never exceeds VOLUME_MAX. */
-static void volume_whole_changed(
-    VariableItem* item,
-    uint8_t* l_idx,
-    AccelState* l_accel,
-    uint8_t* dl_idx,
-    VariableItem* dl_item) {
-    uint8_t raw = variable_item_get_current_value_index(item);
-    *l_idx = apply_accel(l_accel, *l_idx, raw, VOLUME_L_COUNT - 1, 10);
-    variable_item_set_current_value_index(item, *l_idx);
-    char buf[12];
-    snprintf(buf, sizeof(buf), "%u L", *l_idx);
-    variable_item_set_current_value_text(item, buf);
+/* Volume fields need 1000 distinct 0.1 L steps to cover 0.1..100.0 L, but
+   VariableItemList's values_count is a uint8_t (max 255). Instead of a plain
+   index, the volume row is a 3-position self-centering "nudge" control
+   (Left=0, Center=1, Right=2): every change callback applies +/- step to our
+   own float and immediately snaps the row back to the center index, so the
+   next press is detectable again. This keeps the field a single visual row
+   with unlimited underlying range/precision. */
+#define NUDGE_COUNT 3
+#define NUDGE_CENTER 1
 
-    if(*l_idx == VOLUME_L_COUNT - 1 && *dl_idx != 0) {
-        *dl_idx = 0;
-        variable_item_set_current_value_index(dl_item, 0);
-        variable_item_set_current_value_text(dl_item, "+0.0 L");
+static float apply_volume_nudge(AccelState* accel, float old_value, uint8_t raw_idx) {
+    int32_t dir = 0;
+    if(raw_idx > NUDGE_CENTER) dir = 1;
+    else if(raw_idx < NUDGE_CENTER) dir = -1;
+    if(dir == 0) return old_value;
+
+    uint32_t now = furi_get_tick();
+    if(now - accel->last_tick > ACCEL_REPEAT_GAP_MS) {
+        accel->hold_start_tick = now;
     }
-}
+    accel->last_tick = now;
 
-static void
-    volume_frac_changed(VariableItem* item, uint8_t l_idx, uint8_t* dl_idx, AccelState* dl_accel) {
-    uint8_t raw = variable_item_get_current_value_index(item);
-    if(l_idx >= VOLUME_L_COUNT - 1) raw = 0; /* whole part already at max */
-    *dl_idx = apply_accel(dl_accel, *dl_idx, raw, VOLUME_DL_COUNT - 1, 5);
-    variable_item_set_current_value_index(item, *dl_idx);
-    char buf[12];
-    snprintf(buf, sizeof(buf), "+0.%u L", *dl_idx);
-    variable_item_set_current_value_text(item, buf);
+    float step = (now - accel->hold_start_tick > ACCEL_HOLD_MS) ? 1.0f : 0.1f;
+
+    float result = old_value + (float)dir * step;
+    if(result < VOLUME_MIN) result = VOLUME_MIN;
+    if(result > VOLUME_MAX) result = VOLUME_MAX;
+    return result;
 }
 
 typedef struct {
@@ -109,54 +100,35 @@ typedef struct {
     /* Dilute: spirit + water -> lower degree */
     uint8_t d_before_idx;
     uint8_t d_after_idx;
-    uint8_t d_volume_l_idx;
-    uint8_t d_volume_dl_idx;
+    float d_volume;
     AccelState d_before_accel;
     AccelState d_after_accel;
-    AccelState d_volume_l_accel;
-    AccelState d_volume_dl_accel;
-    VariableItem* d_volume_dl_item;
+    AccelState d_volume_accel;
     VariableItem* d_water_item;
     VariableItem* d_total_item;
 
     /* Mix: two ready drinks -> resulting volume/degree */
-    uint8_t m_v1_l_idx;
-    uint8_t m_v1_dl_idx;
+    float m_v1;
     uint8_t m_c1_idx;
-    uint8_t m_v2_l_idx;
-    uint8_t m_v2_dl_idx;
+    float m_v2;
     uint8_t m_c2_idx;
-    AccelState m_v1_l_accel;
-    AccelState m_v1_dl_accel;
+    AccelState m_v1_accel;
     AccelState m_c1_accel;
-    AccelState m_v2_l_accel;
-    AccelState m_v2_dl_accel;
+    AccelState m_v2_accel;
     AccelState m_c2_accel;
-    VariableItem* m_v1_dl_item;
-    VariableItem* m_v2_dl_item;
     VariableItem* m_total_v_item;
     VariableItem* m_total_c_item;
 
     /* Target: desired volume/degree from spirit -> water/spirit needed */
-    uint8_t t_volume_l_idx;
-    uint8_t t_volume_dl_idx;
+    float t_volume;
     uint8_t t_degree_idx;
     uint8_t t_spirit_idx;
-    AccelState t_volume_l_accel;
-    AccelState t_volume_dl_accel;
+    AccelState t_volume_accel;
     AccelState t_degree_accel;
     AccelState t_spirit_accel;
-    VariableItem* t_volume_dl_item;
     VariableItem* t_spirit_item;
     VariableItem* t_water_item;
 } AlcoholCalcApp;
-
-static float combine_volume(uint8_t l_idx, uint8_t dl_idx) {
-    float v = (float)l_idx + (float)dl_idx * 0.1f;
-    if(v < 0.1f) v = 0.1f;
-    if(v > VOLUME_MAX) v = VOLUME_MAX;
-    return v;
-}
 
 static uint8_t degree_from_idx(uint8_t idx) {
     return idx + 1;
@@ -167,7 +139,7 @@ static uint8_t degree_from_idx(uint8_t idx) {
 static void dilute_recalculate(AlcoholCalcApp* app) {
     float before = degree_from_idx(app->d_before_idx);
     float after = degree_from_idx(app->d_after_idx);
-    float volume = combine_volume(app->d_volume_l_idx, app->d_volume_dl_idx);
+    float volume = app->d_volume;
     char buf[16];
 
     if(before <= after) {
@@ -208,20 +180,14 @@ static void dilute_after_changed(VariableItem* item) {
     dilute_recalculate(app);
 }
 
-static void dilute_volume_l_changed(VariableItem* item) {
+static void dilute_volume_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    volume_whole_changed(
-        item,
-        &app->d_volume_l_idx,
-        &app->d_volume_l_accel,
-        &app->d_volume_dl_idx,
-        app->d_volume_dl_item);
-    dilute_recalculate(app);
-}
-
-static void dilute_volume_dl_changed(VariableItem* item) {
-    AlcoholCalcApp* app = variable_item_get_context(item);
-    volume_frac_changed(item, app->d_volume_l_idx, &app->d_volume_dl_idx, &app->d_volume_dl_accel);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->d_volume = apply_volume_nudge(&app->d_volume_accel, app->d_volume, raw);
+    variable_item_set_current_value_index(item, NUDGE_CENTER);
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%.1f L", (double)app->d_volume);
+    variable_item_set_current_value_text(item, buf);
     dilute_recalculate(app);
 }
 
@@ -237,8 +203,7 @@ static void alcohol_calc_build_dilute_view(AlcoholCalcApp* app) {
 
     app->d_before_idx = 95; /* 96 */
     app->d_after_idx = 39; /* 40 */
-    app->d_volume_l_idx = 10;
-    app->d_volume_dl_idx = 0;
+    app->d_volume = 10.0f;
 
     item = variable_item_list_add(list, "Before, %", DEGREE_COUNT, dilute_before_changed, app);
     variable_item_set_current_value_index(item, app->d_before_idx);
@@ -250,16 +215,10 @@ static void alcohol_calc_build_dilute_view(AlcoholCalcApp* app) {
     snprintf(buf, sizeof(buf), "%u%%", degree_from_idx(app->d_after_idx));
     variable_item_set_current_value_text(item, buf);
 
-    item = variable_item_list_add(list, "Volume", VOLUME_L_COUNT, dilute_volume_l_changed, app);
-    variable_item_set_current_value_index(item, app->d_volume_l_idx);
-    snprintf(buf, sizeof(buf), "%u L", app->d_volume_l_idx);
+    item = variable_item_list_add(list, "Volume", NUDGE_COUNT, dilute_volume_changed, app);
+    variable_item_set_current_value_index(item, NUDGE_CENTER);
+    snprintf(buf, sizeof(buf), "%.1f L", (double)app->d_volume);
     variable_item_set_current_value_text(item, buf);
-
-    app->d_volume_dl_item =
-        variable_item_list_add(list, "Volume, .1 L", VOLUME_DL_COUNT, dilute_volume_dl_changed, app);
-    variable_item_set_current_value_index(app->d_volume_dl_item, app->d_volume_dl_idx);
-    snprintf(buf, sizeof(buf), "+0.%u L", app->d_volume_dl_idx);
-    variable_item_set_current_value_text(app->d_volume_dl_item, buf);
 
     app->d_water_item = variable_item_list_add(list, "Add water", 1, NULL, app);
     app->d_total_item = variable_item_list_add(list, "Total vol", 1, NULL, app);
@@ -272,9 +231,9 @@ static void alcohol_calc_build_dilute_view(AlcoholCalcApp* app) {
 /* ---------- Mix screen ---------- */
 
 static void mix_recalculate(AlcoholCalcApp* app) {
-    float v1 = combine_volume(app->m_v1_l_idx, app->m_v1_dl_idx);
+    float v1 = app->m_v1;
     float c1 = degree_from_idx(app->m_c1_idx);
-    float v2 = combine_volume(app->m_v2_l_idx, app->m_v2_dl_idx);
+    float v2 = app->m_v2;
     float c2 = degree_from_idx(app->m_c2_idx);
     char buf[16];
 
@@ -288,16 +247,14 @@ static void mix_recalculate(AlcoholCalcApp* app) {
     variable_item_set_current_value_text(app->m_total_c_item, buf);
 }
 
-static void mix_v1_l_changed(VariableItem* item) {
+static void mix_v1_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    volume_whole_changed(
-        item, &app->m_v1_l_idx, &app->m_v1_l_accel, &app->m_v1_dl_idx, app->m_v1_dl_item);
-    mix_recalculate(app);
-}
-
-static void mix_v1_dl_changed(VariableItem* item) {
-    AlcoholCalcApp* app = variable_item_get_context(item);
-    volume_frac_changed(item, app->m_v1_l_idx, &app->m_v1_dl_idx, &app->m_v1_dl_accel);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->m_v1 = apply_volume_nudge(&app->m_v1_accel, app->m_v1, raw);
+    variable_item_set_current_value_index(item, NUDGE_CENTER);
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%.1f L", (double)app->m_v1);
+    variable_item_set_current_value_text(item, buf);
     mix_recalculate(app);
 }
 
@@ -312,16 +269,14 @@ static void mix_c1_changed(VariableItem* item) {
     mix_recalculate(app);
 }
 
-static void mix_v2_l_changed(VariableItem* item) {
+static void mix_v2_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    volume_whole_changed(
-        item, &app->m_v2_l_idx, &app->m_v2_l_accel, &app->m_v2_dl_idx, app->m_v2_dl_item);
-    mix_recalculate(app);
-}
-
-static void mix_v2_dl_changed(VariableItem* item) {
-    AlcoholCalcApp* app = variable_item_get_context(item);
-    volume_frac_changed(item, app->m_v2_l_idx, &app->m_v2_dl_idx, &app->m_v2_dl_accel);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->m_v2 = apply_volume_nudge(&app->m_v2_accel, app->m_v2, raw);
+    variable_item_set_current_value_index(item, NUDGE_CENTER);
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%.1f L", (double)app->m_v2);
+    variable_item_set_current_value_text(item, buf);
     mix_recalculate(app);
 }
 
@@ -341,39 +296,25 @@ static void alcohol_calc_build_mix_view(AlcoholCalcApp* app) {
     VariableItem* item;
     char buf[16];
 
-    app->m_v1_l_idx = 10;
-    app->m_v1_dl_idx = 0;
+    app->m_v1 = 10.0f;
     app->m_c1_idx = 95; /* 96 */
-    app->m_v2_l_idx = 10;
-    app->m_v2_dl_idx = 0;
+    app->m_v2 = 10.0f;
     app->m_c2_idx = 39; /* 40 */
 
-    item = variable_item_list_add(list, "Volume 1", VOLUME_L_COUNT, mix_v1_l_changed, app);
-    variable_item_set_current_value_index(item, app->m_v1_l_idx);
-    snprintf(buf, sizeof(buf), "%u L", app->m_v1_l_idx);
+    item = variable_item_list_add(list, "Volume 1", NUDGE_COUNT, mix_v1_changed, app);
+    variable_item_set_current_value_index(item, NUDGE_CENTER);
+    snprintf(buf, sizeof(buf), "%.1f L", (double)app->m_v1);
     variable_item_set_current_value_text(item, buf);
-
-    app->m_v1_dl_item =
-        variable_item_list_add(list, "Volume 1, .1 L", VOLUME_DL_COUNT, mix_v1_dl_changed, app);
-    variable_item_set_current_value_index(app->m_v1_dl_item, app->m_v1_dl_idx);
-    snprintf(buf, sizeof(buf), "+0.%u L", app->m_v1_dl_idx);
-    variable_item_set_current_value_text(app->m_v1_dl_item, buf);
 
     item = variable_item_list_add(list, "Strength 1", DEGREE_COUNT, mix_c1_changed, app);
     variable_item_set_current_value_index(item, app->m_c1_idx);
     snprintf(buf, sizeof(buf), "%u%%", degree_from_idx(app->m_c1_idx));
     variable_item_set_current_value_text(item, buf);
 
-    item = variable_item_list_add(list, "Volume 2", VOLUME_L_COUNT, mix_v2_l_changed, app);
-    variable_item_set_current_value_index(item, app->m_v2_l_idx);
-    snprintf(buf, sizeof(buf), "%u L", app->m_v2_l_idx);
+    item = variable_item_list_add(list, "Volume 2", NUDGE_COUNT, mix_v2_changed, app);
+    variable_item_set_current_value_index(item, NUDGE_CENTER);
+    snprintf(buf, sizeof(buf), "%.1f L", (double)app->m_v2);
     variable_item_set_current_value_text(item, buf);
-
-    app->m_v2_dl_item =
-        variable_item_list_add(list, "Volume 2, .1 L", VOLUME_DL_COUNT, mix_v2_dl_changed, app);
-    variable_item_set_current_value_index(app->m_v2_dl_item, app->m_v2_dl_idx);
-    snprintf(buf, sizeof(buf), "+0.%u L", app->m_v2_dl_idx);
-    variable_item_set_current_value_text(app->m_v2_dl_item, buf);
 
     item = variable_item_list_add(list, "Strength 2", DEGREE_COUNT, mix_c2_changed, app);
     variable_item_set_current_value_index(item, app->m_c2_idx);
@@ -391,7 +332,7 @@ static void alcohol_calc_build_mix_view(AlcoholCalcApp* app) {
 /* ---------- Target screen ---------- */
 
 static void target_recalculate(AlcoholCalcApp* app) {
-    float volume = combine_volume(app->t_volume_l_idx, app->t_volume_dl_idx);
+    float volume = app->t_volume;
     float degree = degree_from_idx(app->t_degree_idx);
     float spirit = degree_from_idx(app->t_spirit_idx);
     char buf[16];
@@ -412,20 +353,14 @@ static void target_recalculate(AlcoholCalcApp* app) {
     variable_item_set_current_value_text(app->t_water_item, buf);
 }
 
-static void target_volume_l_changed(VariableItem* item) {
+static void target_volume_changed(VariableItem* item) {
     AlcoholCalcApp* app = variable_item_get_context(item);
-    volume_whole_changed(
-        item,
-        &app->t_volume_l_idx,
-        &app->t_volume_l_accel,
-        &app->t_volume_dl_idx,
-        app->t_volume_dl_item);
-    target_recalculate(app);
-}
-
-static void target_volume_dl_changed(VariableItem* item) {
-    AlcoholCalcApp* app = variable_item_get_context(item);
-    volume_frac_changed(item, app->t_volume_l_idx, &app->t_volume_dl_idx, &app->t_volume_dl_accel);
+    uint8_t raw = variable_item_get_current_value_index(item);
+    app->t_volume = apply_volume_nudge(&app->t_volume_accel, app->t_volume, raw);
+    variable_item_set_current_value_index(item, NUDGE_CENTER);
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%.1f L", (double)app->t_volume);
+    variable_item_set_current_value_text(item, buf);
     target_recalculate(app);
 }
 
@@ -456,21 +391,14 @@ static void alcohol_calc_build_target_view(AlcoholCalcApp* app) {
     VariableItem* item;
     char buf[16];
 
-    app->t_volume_l_idx = 10;
-    app->t_volume_dl_idx = 0;
+    app->t_volume = 10.0f;
     app->t_degree_idx = 39; /* 40 */
     app->t_spirit_idx = 95; /* 96 */
 
-    item = variable_item_list_add(list, "Need volume", VOLUME_L_COUNT, target_volume_l_changed, app);
-    variable_item_set_current_value_index(item, app->t_volume_l_idx);
-    snprintf(buf, sizeof(buf), "%u L", app->t_volume_l_idx);
+    item = variable_item_list_add(list, "Need volume", NUDGE_COUNT, target_volume_changed, app);
+    variable_item_set_current_value_index(item, NUDGE_CENTER);
+    snprintf(buf, sizeof(buf), "%.1f L", (double)app->t_volume);
     variable_item_set_current_value_text(item, buf);
-
-    app->t_volume_dl_item =
-        variable_item_list_add(list, "Need volume, .1 L", VOLUME_DL_COUNT, target_volume_dl_changed, app);
-    variable_item_set_current_value_index(app->t_volume_dl_item, app->t_volume_dl_idx);
-    snprintf(buf, sizeof(buf), "+0.%u L", app->t_volume_dl_idx);
-    variable_item_set_current_value_text(app->t_volume_dl_item, buf);
 
     item = variable_item_list_add(list, "Need %", DEGREE_COUNT, target_degree_changed, app);
     variable_item_set_current_value_index(item, app->t_degree_idx);
